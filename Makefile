@@ -1,5 +1,5 @@
 #   make                              # модуль + userspace-утилиты
-#   make KVER=6.14.0-37-generic       # явно под целевое ядро сдачи
+#   make KVER=6.15.7-arch1-1          # явно под целевое ядро (по умолчанию uname -r)
 #   make tools                        # только userspace
 #   make clean
 
