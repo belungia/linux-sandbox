@@ -31,10 +31,21 @@ extern struct mnt_idmap nop_mnt_idmap;
 
 #define SB_COPY_BUF 8192
 
-/* vfs_mkdir сменил тип возврата в 6.15 (int -> struct dentry *). */
+/*
+ * vfs_mkdir: 6.15 сменил возврат int -> struct dentry *; 7.0 добавил 5-й
+ * аргумент struct delegated_inode * (передаём NULL).
+ */
 static int sb_vfs_mkdir_one(struct inode *dir, struct dentry *dentry, umode_t mode)
 {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 15, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 0, 0)
+	struct dentry *r = vfs_mkdir(&nop_mnt_idmap, dir, dentry, mode, NULL);
+
+	if (IS_ERR(r))
+		return PTR_ERR(r);
+	if (r && r != dentry)
+		dput(r);
+	return 0;
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(6, 15, 0)
 	struct dentry *r = vfs_mkdir(&nop_mnt_idmap, dir, dentry, mode);
 
 	if (IS_ERR(r))
