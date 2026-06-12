@@ -644,19 +644,49 @@ unlock:
 	return err;
 }
 
+/*
+ * opaque-маркер: кладётся ВНУТРЬ wh/<путь>/, когда сам wh/<путь> уже стал
+ * каталогом (в нём whiteout-маркеры детей). Решает коллизию «путь нужен и как
+ * файл-маркер (удалён), и как каталог (держит детей)» — напр. при `rm -rf dir`.
+ */
+#define SB_WH_OPAQUE "/.wh..opaque"
+
+static char *sb_opaque_path(const char *wh)
+{
+	size_t lw = strlen(wh), ls = strlen(SB_WH_OPAQUE);
+	char *r = kmalloc(lw + ls + 1, GFP_KERNEL);
+
+	if (r) {
+		memcpy(r, wh, lw);
+		memcpy(r + lw, SB_WH_OPAQUE, ls + 1);
+	}
+	return r;
+}
+
 bool sb_is_whiteout(struct sb_ctx *ctx, const char *abspath)
 {
 	char *wh = sb_wh_path(ctx, abspath);
-	bool r;
+	bool r = false;
+	int kind;
 
 	if (!wh)
 		return false;
 	/*
-	 * Маркер whiteout - это обычный ФАЙЛ. Промежуточные каталоги в wh/
-	 * (родители маркеров) - это директории, и они НЕ означают удаление.
-	 * Иначе stat("/home") после удаления "/home/.../x" ложно даёт ENOENT.
+	 * Удалён, если wh/<путь> — обычный ФАЙЛ-маркер (удалён лист), ИЛИ
+	 * wh/<путь> — каталог с opaque-маркером (удалён каталог, чьи дети тоже
+	 * были удалены). Промежуточные каталоги без opaque — НЕ удаление.
 	 */
-	r = (sb_path_kind(wh) == 1);
+	kind = sb_path_kind(wh);
+	if (kind == 1) {
+		r = true;
+	} else if (kind == 2) {
+		char *op = sb_opaque_path(wh);
+
+		if (op) {
+			r = sb_exists(op);
+			kfree(op);
+		}
+	}
 	kfree(wh);
 	return r;
 }
@@ -681,12 +711,29 @@ int sb_make_whiteout(struct sb_ctx *ctx, const char *abspath)
 
 	sb_mkdir_parent(wh);
 	f = filp_open(wh, O_CREAT | O_WRONLY, 0600);
-	if (IS_ERR(f)) {
-		err = PTR_ERR(f);
-		err = (err == -EEXIST) ? 0 : err;
-	} else {
+	if (!IS_ERR(f)) {
 		filp_close(f, NULL);
 		err = 0;
+	} else if (PTR_ERR(f) == -EEXIST) {
+		err = 0;
+	} else if (PTR_ERR(f) == -EISDIR) {
+		/*
+		 * wh/<путь> уже каталог (его дети были whiteout-нуты) — файл-маркер
+		 * не создать. Помечаем сам каталог удалённым opaque-маркером внутри.
+		 */
+		char *op = sb_opaque_path(wh);
+		struct file *of = op ? filp_open(op, O_CREAT | O_WRONLY, 0600)
+				     : ERR_PTR(-ENOMEM);
+
+		if (!IS_ERR(of)) {
+			filp_close(of, NULL);
+			err = 0;
+		} else {
+			err = (PTR_ERR(of) == -EEXIST) ? 0 : PTR_ERR(of);
+		}
+		kfree(op);
+	} else {
+		err = PTR_ERR(f);
 	}
 	kfree(wh);
 	return err;
@@ -695,11 +742,21 @@ int sb_make_whiteout(struct sb_ctx *ctx, const char *abspath)
 int sb_clear_whiteout(struct sb_ctx *ctx, const char *abspath)
 {
 	char *wh = sb_wh_path(ctx, abspath);
-	int err;
+	int err = 0;
 
 	if (!wh)
 		return -ENOMEM;
-	err = sb_exists(wh) ? sb_unlink_path(wh) : 0;
+	if (sb_path_kind(wh) == 1) {
+		err = sb_unlink_path(wh);		/* файл-маркер листа */
+	} else {
+		char *op = sb_opaque_path(wh);		/* opaque-маркер каталога */
+
+		if (op) {
+			if (sb_exists(op))
+				err = sb_unlink_path(op);
+			kfree(op);
+		}
+	}
 	kfree(wh);
 	return err;
 }
